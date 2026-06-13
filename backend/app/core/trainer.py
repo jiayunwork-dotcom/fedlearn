@@ -295,11 +295,18 @@ class FederatedTrainer:
 
             if self.config.secure_aggregation and self.secure_agg is not None:
                 all_client_ids = [u["client_id"] for u in client_updates]
+                total_weight = sum(client_weights)
+                normalized_weights = [w / total_weight for w in client_weights]
+
                 shared_updates = []
-                for update in client_updates:
+                for i, update in enumerate(client_updates):
                     cid = update["client_id"]
+                    weight = normalized_weights[i]
+                    weighted_state = {}
+                    for key, value in update["model_state"].items():
+                        weighted_state[key] = value.float() * weight
                     shared = self.secure_agg.client_split_update(
-                        cid, update["model_state"], all_client_ids
+                        cid, weighted_state, all_client_ids
                     )
                     shared_updates.append(shared)
 
