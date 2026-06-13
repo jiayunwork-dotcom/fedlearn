@@ -275,7 +275,7 @@ async def batch_compare_experiments(req: BatchCompareRequest):
             contributions = {}
 
         state = await redis_mgr.get_state(eid)
-        total_elapsed = sum(m.get("elapsed_seconds", 0) for m in metrics)
+        total_elapsed = metrics[-1].get("elapsed_seconds", 0) if metrics else 0.0
         avg_round_time = 0.0
         if metrics:
             avg_round_time = sum(m.get("round_seconds", 0) for m in metrics) / len(metrics)
