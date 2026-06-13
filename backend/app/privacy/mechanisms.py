@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import math
 import numpy as np
 import torch
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Optional
 
 
 class RDPAccountant:
@@ -84,91 +86,80 @@ class DPSGD:
         self.total_steps = 0
 
 
-class ShamirSecretSharing:
-    def __init__(self, n: int, t: int, prime: int = 2 ** 31 - 1):
+class AdditiveSecretSharing:
+    def __init__(self, n: int):
         self.n = n
-        self.t = t
-        self.prime = prime
-
-    def _eval_poly(self, coeffs, x):
-        result = 0
-        for i, c in enumerate(coeffs):
-            result = (result + c * pow(x, i, self.prime)) % self.prime
-        return result
 
     def split(self, secret: float) -> List[Tuple[int, float]]:
-        coeffs = [secret % self.prime]
-        for _ in range(self.t - 1):
-            coeffs.append(np.random.randint(0, self.prime))
-
         shares = []
-        for i in range(1, self.n + 1):
-            shares.append((i, self._eval_poly(coeffs, i)))
+        remaining = secret
+        for i in range(self.n - 1):
+            scale = max(1e-6, abs(secret) * 0.1)
+            s = np.random.uniform(-scale, scale)
+            shares.append((i + 1, s))
+            remaining -= s
+        shares.append((self.n, remaining))
         return shares
 
     def reconstruct(self, shares: List[Tuple[int, float]]) -> float:
-        if len(shares) < self.t:
-            raise ValueError(f"Need at least {self.t} shares, got {len(shares)}")
-
-        used = shares[: self.t]
-        secret = 0.0
-        for i, (xi, yi) in enumerate(used):
-            numerator = 1.0
-            denominator = 1.0
-            for j, (xj, _) in enumerate(used):
-                if i != j:
-                    numerator *= -xj
-                    denominator *= (xi - xj)
-            lagrange = numerator / denominator
-            secret += yi * lagrange
-        return secret
+        if len(shares) < self.n:
+            raise ValueError(f"Need all {self.n} shares, got {len(shares)}")
+        return float(sum(s[1] for s in shares))
 
 
 class SecureAggregation:
     def __init__(self, num_clients: int, threshold: int = None):
         self.num_clients = num_clients
-        self.threshold = threshold or (num_clients // 2 + 1)
-        self.shamir = ShamirSecretSharing(num_clients, self.threshold)
+        self.threshold = num_clients
+        self.shamir = AdditiveSecretSharing(num_clients)
+        self._split_operations = 0
+        self._aggregate_operations = 0
 
-    def client_split_update(self, client_id: int, update_params: dict, all_client_ids: list) -> dict:
-        shares_dict = {}
+    def client_split_update(self, client_id: int, update_params: Dict[str, torch.Tensor], all_client_ids: List[int]) -> dict:
+        shares_dict: Dict[str, List] = {}
         for key, value in update_params.items():
-            flat = value.flatten().tolist()
-            shares = []
+            flat = value.cpu().numpy().flatten()
+            param_shares: List[List[Tuple[int, float]]] = []
             for v in flat:
-                s = self.shamir.split(v)
-                shares.append(s)
-            shares_dict[key] = shares
+                s = self.shamir.split(float(v))
+                param_shares.append(s)
+            shares_dict[key] = param_shares
+        self._split_operations += 1
         return shares_dict
 
-    def aggregate_shares(self, all_client_shares: list, surviving_ids: list) -> dict:
+    def aggregate_shares(self, all_client_shares: List[Dict], surviving_ids: List[int]) -> Dict[str, np.ndarray]:
         if len(surviving_ids) < self.threshold:
             raise ValueError(f"Not enough surviving clients: {len(surviving_ids)} < {self.threshold}")
 
-        aggregated = {}
+        aggregated: Dict[str, np.ndarray] = {}
         num_surviving = len(surviving_ids)
 
         first_shares = all_client_shares[0]
         for key in first_shares:
-            param_shares_list = []
+            param_shares_list: List[List] = []
             for client_shares in all_client_shares:
                 param_shares_list.append(client_shares[key])
 
             num_params = len(param_shares_list[0])
-            result = []
+            result = np.zeros(num_params, dtype=np.float64)
+
             for p_idx in range(num_params):
-                surviving_shares = []
+                total = 0.0
                 for c_idx in range(num_surviving):
                     share_points = param_shares_list[c_idx][p_idx]
-                    surviving_shares.append(share_points[c_idx % len(share_points)])
+                    client_secret = self.shamir.reconstruct(share_points)
+                    total += client_secret
+                result[p_idx] = total
 
-                reconstructed = self.shamir.reconstruct(surviving_shares)
-                result.append(reconstructed / num_surviving)
-
-            sample_shape = None
-            for client_shares in all_client_shares:
-                if key in client_shares:
-                    break
             aggregated[key] = result
 
+        self._aggregate_operations += 1
         return aggregated
+
+    def get_stats(self) -> Dict[str, int]:
+        return {
+            "split_operations": self._split_operations,
+            "aggregate_operations": self._aggregate_operations,
+            "num_clients": self.num_clients,
+            "threshold": self.threshold,
+        }

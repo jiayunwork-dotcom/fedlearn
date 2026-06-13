@@ -58,12 +58,7 @@ class FedProxAggregator(BaseAggregator):
         for key in global_state:
             new_state[key] = torch.zeros_like(global_state[key], dtype=torch.float32)
             for i, update in enumerate(client_updates):
-                prox_update = update["model_state"][key].float()
-                if "local_steps" in update:
-                    prox_update = prox_update - (self.mu / max(1, update["local_steps"])) * (
-                        update["model_state"][key].float() - global_state[key].float()
-                    )
-                new_state[key] += normalized_weights[i] * prox_update
+                new_state[key] += normalized_weights[i] * update["model_state"][key].float()
         return new_state
 
     def get_name(self) -> str:

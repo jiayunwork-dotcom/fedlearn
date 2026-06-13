@@ -129,15 +129,19 @@ class FeatureSkewDataset(Dataset):
 
 
 class ClientDataset(Dataset):
-    def __init__(self, base_dataset, indices):
+    def __init__(self, base_dataset, indices, transform=None):
         self.base_dataset = base_dataset
         self.indices = indices
+        self.transform = transform
 
     def __len__(self):
         return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.base_dataset[self.indices[idx]]
+        img, label = self.base_dataset[self.indices[idx]]
+        if self.transform:
+            img = self.transform(img)
+        return img, label
 
 
 def create_data_partitions(
@@ -167,6 +171,7 @@ def create_data_partitions(
         test_ds = datasets.CIFAR10(data_dir, train=False, download=True, transform=test_transform)
 
     client_datasets: Dict[int, Dataset] = {}
+    train_transform = get_transforms(dataset_name, feature_skew=False)
     for client_id, indices in client_indices.items():
         if len(indices) == 0:
             continue
@@ -175,7 +180,7 @@ def create_data_partitions(
             noise = non_iid_param * 0.1 * (client_id / max(1, num_clients - 1))
             client_datasets[client_id] = FeatureSkewDataset(train_dataset, indices, rotation, noise)
         else:
-            client_datasets[client_id] = ClientDataset(train_dataset, indices)
+            client_datasets[client_id] = ClientDataset(train_dataset, indices, transform=train_transform)
 
     label_distribution = []
     targets = np.array([train_dataset[i][1] for i in range(len(train_dataset))])

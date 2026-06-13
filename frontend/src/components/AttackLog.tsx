@@ -7,7 +7,12 @@ interface Props {
 
 const iconMap: Record<string, React.ReactNode> = {
   anomaly_detected: <AlertTriangle size={14} className="text-amber-400" />,
+  anomaly_detected_low: <AlertTriangle size={14} className="text-yellow-400" />,
+  anomaly_detected_medium: <AlertTriangle size={14} className="text-orange-400" />,
+  anomaly_detected_high: <AlertTriangle size={14} className="text-red-500" />,
   privacy_budget_exhausted: <ShieldAlert size={14} className="text-red-400" />,
+  byzantine_clients_active: <ShieldOff size={14} className="text-rose-400" />,
+  secure_aggregation: <ShieldAlert size={14} className="text-cyan-400" />,
 };
 
 export function AttackLog({ logs }: Props) {
