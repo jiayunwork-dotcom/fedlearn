@@ -4,12 +4,14 @@ import {
   ExperimentStatus,
   RoundMetrics,
   AttackLogEntry,
+  ComparisonItem,
   listExperiments,
   getStatus,
   getMetrics,
   getContributions,
   getLabelDistribution,
   getAttackLog,
+  batchCompareExperiments,
 } from "@/api";
 
 interface AppState {
@@ -22,12 +24,21 @@ interface AppState {
   attackLog: AttackLogEntry[];
   pollingTimer: ReturnType<typeof setInterval> | null;
 
+  comparisons: ComparisonItem[];
+  comparisonsLoading: boolean;
+  selectedCompareIds: string[];
+
   fetchExperiments: () => Promise<void>;
   selectExperiment: (id: string) => void;
   startPolling: (id: string) => void;
   stopPolling: () => void;
   refreshData: (id: string) => Promise<void>;
   setCurrentExperimentId: (id: string | null) => void;
+
+  fetchComparisons: (ids: string[]) => Promise<void>;
+  toggleCompareSelection: (id: string) => void;
+  clearCompareSelection: () => void;
+  setSelectedCompareIds: (ids: string[]) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -39,6 +50,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   labelDistribution: [],
   attackLog: [],
   pollingTimer: null,
+
+  comparisons: [],
+  comparisonsLoading: false,
+  selectedCompareIds: [],
 
   fetchExperiments: async () => {
     try {
@@ -98,4 +113,28 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setCurrentExperimentId: (id) => set({ currentExperimentId: id }),
+
+  fetchComparisons: async (ids: string[]) => {
+    set({ comparisonsLoading: true });
+    try {
+      const data = await batchCompareExperiments(ids);
+      set({ comparisons: data.comparisons, comparisonsLoading: false });
+    } catch (e) {
+      console.error("Failed to fetch comparisons:", e);
+      set({ comparisonsLoading: false });
+    }
+  },
+
+  toggleCompareSelection: (id: string) => {
+    const { selectedCompareIds } = get();
+    if (selectedCompareIds.includes(id)) {
+      set({ selectedCompareIds: selectedCompareIds.filter((x) => x !== id) });
+    } else if (selectedCompareIds.length < 4) {
+      set({ selectedCompareIds: [...selectedCompareIds, id] });
+    }
+  },
+
+  clearCompareSelection: () => set({ selectedCompareIds: [] }),
+
+  setSelectedCompareIds: (ids: string[]) => set({ selectedCompareIds: ids }),
 }));

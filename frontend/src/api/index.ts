@@ -119,6 +119,35 @@ export async function getAttackLog(experimentId: string): Promise<{ experiment_i
   return res.json();
 }
 
+export interface ExperimentSummary {
+  final_accuracy: number;
+  round_to_90_percent: number | null;
+  final_epsilon: number;
+  total_elapsed_seconds: number;
+  avg_round_seconds: number;
+  best_accuracy: number;
+  current_round: number;
+  global_rounds: number;
+}
+
+export interface ComparisonItem {
+  experiment_id: string;
+  config: ExperimentConfig;
+  metrics: RoundMetrics[];
+  contributions: Record<string, number>;
+  summary: ExperimentSummary;
+}
+
+export async function batchCompareExperiments(ids: string[]): Promise<{ comparisons: ComparisonItem[] }> {
+  const res = await fetch(`${API_BASE}/experiments/batch-compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ experiment_ids: ids }),
+  });
+  if (!res.ok) throw new Error(`Batch compare failed: ${res.statusText}`);
+  return res.json();
+}
+
 export async function compareExperiments(experimentId: string, otherId: string) {
   const res = await fetch(`${API_BASE}/experiments/${experimentId}/compare?other_id=${otherId}`);
   if (!res.ok) throw new Error(`Compare experiments failed: ${res.statusText}`);

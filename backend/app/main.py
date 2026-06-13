@@ -28,6 +28,10 @@ app.add_middleware(
 )
 
 
+class BatchCompareRequest(BaseModel):
+    experiment_ids: list[str] = Field(..., min_length=2, max_length=4)
+
+
 class CreateExperimentRequest(BaseModel):
     dataset: str = Field(default="mnist", description="mnist | cifar10 | fashion_mnist")
     num_clients: int = Field(default=10, ge=5, le=100)
@@ -244,3 +248,66 @@ async def compare_experiments(experiment_id: str, other_id: str):
         "experiment_1": {"id": experiment_id, "metrics": metrics1},
         "experiment_2": {"id": other_id, "metrics": metrics2},
     }
+
+
+@app.post("/api/experiments/batch-compare")
+async def batch_compare_experiments(req: BatchCompareRequest):
+    results = []
+    for eid in req.experiment_ids:
+        config = await redis_mgr.get_experiment(eid)
+        if config is None:
+            raise HTTPException(status_code=404, detail=f"Experiment {eid} not found")
+
+        metrics = None
+        if eid in trainers:
+            metrics = trainers[eid].get_all_metrics()
+        else:
+            metrics = await redis_mgr.get_history(eid)
+        if metrics is None:
+            metrics = []
+
+        contributions = None
+        if eid in trainers:
+            contributions = trainers[eid].get_contribution_ranking()
+        else:
+            contributions = await redis_mgr.get_contributions(eid)
+        if contributions is None:
+            contributions = {}
+
+        state = await redis_mgr.get_state(eid)
+        total_elapsed = sum(m.get("elapsed_seconds", 0) for m in metrics)
+        avg_round_time = 0.0
+        if metrics:
+            avg_round_time = sum(m.get("round_seconds", 0) for m in metrics) / len(metrics)
+
+        final_accuracy = 0.0
+        final_epsilon = 0.0
+        round_to_90 = None
+        if metrics:
+            final_accuracy = metrics[-1].get("global_accuracy", 0.0)
+            final_epsilon = metrics[-1].get("epsilon", 0.0)
+            for m in metrics:
+                if m.get("global_accuracy", 0) >= 0.9:
+                    round_to_90 = m["round"]
+                    break
+
+        summary = {
+            "final_accuracy": final_accuracy,
+            "round_to_90_percent": round_to_90,
+            "final_epsilon": final_epsilon,
+            "total_elapsed_seconds": total_elapsed,
+            "avg_round_seconds": avg_round_time,
+            "best_accuracy": state.get("best_accuracy", 0.0) if state else 0.0,
+            "current_round": state.get("current_round", 0) if state else 0,
+            "global_rounds": state.get("global_rounds", 0) if state else 0,
+        }
+
+        results.append({
+            "experiment_id": eid,
+            "config": config,
+            "metrics": metrics,
+            "contributions": contributions,
+            "summary": summary,
+        })
+
+    return {"comparisons": results}
