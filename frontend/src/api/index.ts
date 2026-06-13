@@ -153,3 +153,126 @@ export async function compareExperiments(experimentId: string, otherId: string) 
   if (!res.ok) throw new Error(`Compare experiments failed: ${res.statusText}`);
   return res.json();
 }
+
+export type AnalysisMethod = "gradient" | "permutation" | "shap";
+
+export interface InterpretabilityLogEntry {
+  batch: number;
+  total_batches: number;
+  sample_start?: number;
+  sample_end?: number;
+  feature_index?: number;
+  feature_coord?: number[];
+  accuracy_drop?: number;
+  batch_time_ms: number;
+  top_features: number[];
+  timestamp: number;
+}
+
+export interface ClientContributionFeature {
+  index: number;
+  coord: number[];
+  importance: number;
+  client_values: number[];
+}
+
+export interface ClientContributions {
+  client_names: string[];
+  client_weights: number[];
+  top_features: ClientContributionFeature[];
+}
+
+export interface InterpretabilityResult {
+  method: AnalysisMethod;
+  num_samples: number;
+  overall_attribution: number[][][];
+  class_attributions: number[][][][];
+  class_sample_counts: number[];
+  client_contributions: ClientContributions;
+  logs: InterpretabilityLogEntry[];
+  status: string;
+  error?: string;
+}
+
+export interface InterpretabilityProgress {
+  type: "progress";
+  progress: number;
+  current_sample: number;
+  log?: InterpretabilityLogEntry;
+}
+
+export interface InterpretabilityComplete {
+  type: "complete";
+  status: string;
+  result: InterpretabilityResult;
+}
+
+export type InterpretabilityWebSocketMessage = InterpretabilityProgress | InterpretabilityComplete;
+
+export async function startInterpretabilityAnalysis(
+  experimentId: string,
+  method: AnalysisMethod,
+  numSamples: number
+): Promise<{
+  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string; cached: boolean; result?: InterpretabilityResult
+}> {
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method, num_samples: numSamples }),
+  });
+  if (!res.ok) throw new Error(`Start interpretability analysis failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function cancelInterpretabilityAnalysis(
+  experimentId: string,
+  method?: AnalysisMethod,
+  numSamples?: number
+): Promise<{ experiment_id: string; status: string; method?: AnalysisMethod; num_samples?: number; cancelled_tasks?: Array<{ method: AnalysisMethod; num_samples: number }> }> {
+  const params = new URLSearchParams();
+  if (method) params.append("method", method);
+  if (numSamples !== undefined) params.append("num_samples", numSamples.toString());
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/cancel${query}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Cancel interpretability analysis failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getInterpretabilityStatus(
+  experimentId: string,
+  method?: AnalysisMethod,
+  numSamples?: number
+): Promise<any> {
+  const params = new URLSearchParams();
+  if (method) params.append("method", method);
+  if (numSamples !== undefined) params.append("num_samples", numSamples.toString());
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/status${query}`);
+  if (!res.ok) throw new Error(`Get interpretability status failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function getInterpretabilityResult(
+  experimentId: string,
+  method: AnalysisMethod,
+  numSamples: number
+): Promise<{
+  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string; result?: InterpretabilityResult; progress?: number
+}> {
+  const res = await fetch(
+    `${API_BASE}/experiments/${experimentId}/interpretability/result?method=${method}&num_samples=${numSamples}`
+  );
+  if (!res.ok) throw new Error(`Get interpretability result failed: ${res.statusText}`);
+  return res.json();
+}
+
+export function getInterpretabilityWebSocketUrl(experimentId: string): string {
+  const wsBase = import.meta.env.VITE_WS_URL ||
+    (window.location.protocol === "https:" ? "wss:" : "ws:") + "//" + window.location.host;
+  return `${wsBase}/ws/experiments/${experimentId}/interpretability`;
+}

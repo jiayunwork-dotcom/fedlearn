@@ -88,3 +88,37 @@ class RedisManager:
         keys = await self.client.keys(pattern)
         if keys:
             await self.client.delete(*keys)
+
+    async def set_interpretability_result(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int,
+        result: dict
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}"
+        await self.client.set(key, json.dumps(result))
+
+    async def get_interpretability_result(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ) -> Optional[dict]:
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}"
+        data = await self.client.get(key)
+        return json.loads(data) if data else None
+
+    async def delete_interpretability_result(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}"
+        await self.client.delete(key)
+
+    async def list_interpretability_results(self, experiment_id: str) -> List[str]:
+        pattern = f"experiment:{experiment_id}:interpretability:*"
+        keys = await self.client.keys(pattern)
+        return [key.split(":")[-2:] for key in keys]

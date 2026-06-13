@@ -5,6 +5,9 @@ import {
   RoundMetrics,
   AttackLogEntry,
   ComparisonItem,
+  AnalysisMethod,
+  InterpretabilityResult,
+  InterpretabilityLogEntry,
   listExperiments,
   getStatus,
   getMetrics,
@@ -12,6 +15,10 @@ import {
   getLabelDistribution,
   getAttackLog,
   batchCompareExperiments,
+  startInterpretabilityAnalysis,
+  cancelInterpretabilityAnalysis,
+  getInterpretabilityResult,
+  getInterpretabilityWebSocketUrl,
 } from "@/api";
 
 interface AppState {
@@ -28,6 +35,18 @@ interface AppState {
   comparisonsLoading: boolean;
   selectedCompareIds: string[];
 
+  interpretabilityPanelOpen: boolean;
+  interpretabilityMethod: AnalysisMethod;
+  interpretabilityNumSamples: number;
+  interpretabilityStatus: "idle" | "running" | "completed" | "cancelled" | "error";
+  interpretabilityProgress: number;
+  interpretabilityCurrentSample: number;
+  interpretabilityLogs: InterpretabilityLogEntry[];
+  interpretabilityResult: InterpretabilityResult | null;
+  interpretabilityError: string | null;
+  interpretabilityWs: WebSocket | null;
+  selectedClassForDetail: number | null;
+
   fetchExperiments: () => Promise<void>;
   selectExperiment: (id: string) => void;
   startPolling: (id: string) => void;
@@ -39,6 +58,17 @@ interface AppState {
   toggleCompareSelection: (id: string) => void;
   clearCompareSelection: () => void;
   setSelectedCompareIds: (ids: string[]) => void;
+
+  openInterpretabilityPanel: () => void;
+  closeInterpretabilityPanel: () => void;
+  setInterpretabilityMethod: (method: AnalysisMethod) => void;
+  setInterpretabilityNumSamples: (num: number) => void;
+  startInterpretability: (experimentId: string) => Promise<void>;
+  cancelInterpretability: (experimentId: string) => Promise<void>;
+  connectInterpretabilityWs: (experimentId: string) => void;
+  disconnectInterpretabilityWs: () => void;
+  setSelectedClassForDetail: (classIdx: number | null) => void;
+  resetInterpretability: () => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -54,6 +84,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   comparisons: [],
   comparisonsLoading: false,
   selectedCompareIds: [],
+
+  interpretabilityPanelOpen: false,
+  interpretabilityMethod: "gradient",
+  interpretabilityNumSamples: 50,
+  interpretabilityStatus: "idle",
+  interpretabilityProgress: 0,
+  interpretabilityCurrentSample: 0,
+  interpretabilityLogs: [],
+  interpretabilityResult: null,
+  interpretabilityError: null,
+  interpretabilityWs: null,
+  selectedClassForDetail: null,
 
   fetchExperiments: async () => {
     try {
@@ -137,4 +179,168 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearCompareSelection: () => set({ selectedCompareIds: [] }),
 
   setSelectedCompareIds: (ids: string[]) => set({ selectedCompareIds: ids }),
+
+  openInterpretabilityPanel: () => set({ interpretabilityPanelOpen: true }),
+  closeInterpretabilityPanel: () => {
+    get().disconnectInterpretabilityWs();
+    set({
+      interpretabilityPanelOpen: false,
+      selectedClassForDetail: null,
+    });
+  },
+
+  setInterpretabilityMethod: (method: AnalysisMethod) => set({ interpretabilityMethod: method }),
+  setInterpretabilityNumSamples: (num: number) => set({ interpretabilityNumSamples: num }),
+  setSelectedClassForDetail: (classIdx: number | null) => set({ selectedClassForDetail: classIdx }),
+
+  resetInterpretability: () => set({
+    interpretabilityStatus: "idle",
+    interpretabilityProgress: 0,
+    interpretabilityCurrentSample: 0,
+    interpretabilityLogs: [],
+    interpretabilityResult: null,
+    interpretabilityError: null,
+    selectedClassForDetail: null,
+  }),
+
+  connectInterpretabilityWs: (experimentId: string) => {
+    const { interpretabilityWs } = get();
+    if (interpretabilityWs && interpretabilityWs.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    try {
+      const wsUrl = getInterpretabilityWebSocketUrl(experimentId);
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("Interpretability WebSocket connected");
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+
+          if (message.type === "progress") {
+            const updates: Partial<AppState> = {
+              interpretabilityProgress: message.progress,
+              interpretabilityCurrentSample: message.current_sample,
+            };
+            if (message.log) {
+              updates.interpretabilityLogs = [...get().interpretabilityLogs, message.log];
+            }
+            set(updates);
+          } else if (message.type === "complete") {
+            const status = message.status;
+            if (status === "completed") {
+              set({
+                interpretabilityStatus: "completed",
+                interpretabilityProgress: 100,
+                interpretabilityResult: message.result,
+              });
+            } else if (status === "cancelled") {
+              set({ interpretabilityStatus: "cancelled" });
+            } else if (status === "failed") {
+              set({
+                interpretabilityStatus: "error",
+                interpretabilityError: message.result?.error || "Analysis failed",
+              });
+            }
+            get().disconnectInterpretabilityWs();
+          }
+        } catch (e) {
+          console.error("Failed to parse WebSocket message:", e);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("Interpretability WebSocket error:", error);
+        set({
+          interpretabilityStatus: "error",
+          interpretabilityError: "WebSocket connection error",
+        });
+      };
+
+      ws.onclose = () => {
+        console.log("Interpretability WebSocket disconnected");
+        set({ interpretabilityWs: null });
+      };
+
+      set({ interpretabilityWs: ws });
+    } catch (e) {
+      console.error("Failed to connect WebSocket:", e);
+      set({
+        interpretabilityStatus: "error",
+        interpretabilityError: "Failed to connect to server",
+      });
+    }
+  },
+
+  disconnectInterpretabilityWs: () => {
+    const { interpretabilityWs } = get();
+    if (interpretabilityWs) {
+      interpretabilityWs.close();
+      set({ interpretabilityWs: null });
+    }
+  },
+
+  startInterpretability: async (experimentId: string) => {
+    const { interpretabilityMethod, interpretabilityNumSamples } = get();
+
+    set({
+      interpretabilityStatus: "running",
+      interpretabilityProgress: 0,
+      interpretabilityCurrentSample: 0,
+      interpretabilityLogs: [],
+      interpretabilityResult: null,
+      interpretabilityError: null,
+      selectedClassForDetail: null,
+    });
+
+    try {
+      get().connectInterpretabilityWs(experimentId);
+
+      const response = await startInterpretabilityAnalysis(
+        experimentId,
+        interpretabilityMethod,
+        interpretabilityNumSamples
+      );
+
+      if (response.cached && response.result) {
+        set({
+          interpretabilityStatus: "completed",
+          interpretabilityProgress: 100,
+          interpretabilityResult: response.result,
+        });
+        get().disconnectInterpretabilityWs();
+      }
+    } catch (e: any) {
+      console.error("Failed to start interpretability analysis:", e);
+      set({
+        interpretabilityStatus: "error",
+        interpretabilityError: e.message || "Failed to start analysis",
+      });
+      get().disconnectInterpretabilityWs();
+    }
+  },
+
+  cancelInterpretability: async (experimentId: string) => {
+    const { interpretabilityMethod, interpretabilityNumSamples } = get();
+
+    try {
+      await cancelInterpretabilityAnalysis(
+        experimentId,
+        interpretabilityMethod,
+        interpretabilityNumSamples
+      );
+      set({ interpretabilityStatus: "cancelled" });
+      get().disconnectInterpretabilityWs();
+    } catch (e: any) {
+      console.error("Failed to cancel interpretability analysis:", e);
+      set({
+        interpretabilityStatus: "error",
+        interpretabilityError: e.message || "Failed to cancel analysis",
+      });
+    }
+  },
 }));

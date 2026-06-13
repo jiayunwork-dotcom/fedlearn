@@ -8,7 +8,8 @@ import { ContributionChart } from "@/components/ContributionChart";
 import { PrivacyChart } from "@/components/PrivacyChart";
 import { LabelDistribution } from "@/components/LabelDistribution";
 import { AttackLog } from "@/components/AttackLog";
-import { ArrowLeft, Square, Activity } from "lucide-react";
+import { InterpretabilityPanel } from "@/components/InterpretabilityPanel";
+import { ArrowLeft, Square, Activity, BarChart3 } from "lucide-react";
 
 export default function ExperimentDetail() {
   const { id } = useParams<{ id: string }>();
@@ -21,6 +22,10 @@ export default function ExperimentDetail() {
   const contributions = useAppStore((s) => s.contributions);
   const labelDistribution = useAppStore((s) => s.labelDistribution);
   const attackLog = useAppStore((s) => s.attackLog);
+  const interpretabilityPanelOpen = useAppStore((s) => s.interpretabilityPanelOpen);
+  const openInterpretabilityPanel = useAppStore((s) => s.openInterpretabilityPanel);
+  const closeInterpretabilityPanel = useAppStore((s) => s.closeInterpretabilityPanel);
+  const resetInterpretability = useAppStore((s) => s.resetInterpretability);
 
   useEffect(() => {
     if (!id) return;
@@ -75,6 +80,19 @@ export default function ExperimentDetail() {
               Stop Training
             </button>
           )}
+
+          {!status.is_running && status.current_round > 0 && (
+            <button
+              onClick={() => {
+                resetInterpretability();
+                openInterpretabilityPanel();
+              }}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-500/20 to-blue-600/20 border border-cyan-500/30 text-cyan-400 text-sm hover:from-cyan-500/30 hover:to-blue-600/30 transition-colors"
+            >
+              <BarChart3 size={14} />
+              可解释性分析
+            </button>
+          )}
         </div>
 
         <TrainingProgress status={status} metrics={metrics} />
@@ -95,6 +113,10 @@ export default function ExperimentDetail() {
           </div>
         )}
       </div>
+
+      {interpretabilityPanelOpen && id && (
+        <InterpretabilityPanel experimentId={id} onClose={closeInterpretabilityPanel} />
+      )}
     </div>
   );
 }
