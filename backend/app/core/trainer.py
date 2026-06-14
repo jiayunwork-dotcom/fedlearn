@@ -515,6 +515,10 @@ class FederatedTrainer:
             if self.attack_log:
                 attack_key = f"experiment:{self.config.experiment_id}:attack_log"
                 await self.redis.set(attack_key, json.dumps(self.attack_log))
+
+            model_state_key = f"experiment:{self.config.experiment_id}:global_model_state"
+            serializable_state = {k: v.cpu().tolist() for k, v in self.global_model.state_dict().items()}
+            await self.redis.set(model_state_key, json.dumps(serializable_state))
         except Exception as e:
             logger.error(f"Redis publish error: {e}")
 

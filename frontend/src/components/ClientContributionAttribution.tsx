@@ -8,11 +8,25 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  type TooltipProps,
 } from "recharts";
 import type { ClientContributions } from "@/api";
 
 interface Props {
   clientContributions: ClientContributions | null | undefined;
+}
+
+interface ChartDataPoint {
+  feature: string;
+  importance: number;
+  [key: `client_${number}`]: number;
+}
+
+interface TooltipPayloadItem {
+  dataKey: string;
+  value: number;
+  color: string;
+  payload: ChartDataPoint;
 }
 
 const CLIENT_COLORS = [
@@ -28,25 +42,35 @@ const CLIENT_COLORS = [
   "#ef4444",
 ];
 
+function isClientPayload(item: unknown): item is TooltipPayloadItem {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    "dataKey" in item &&
+    typeof (item as { dataKey: unknown }).dataKey === "string" &&
+    (item as { dataKey: string }).dataKey.startsWith("client_")
+  );
+}
+
 export function ClientContributionAttribution({ clientContributions }: Props) {
-  const chartData = useMemo(() => {
+  const chartData = useMemo((): ChartDataPoint[] => {
     if (!clientContributions?.top_features) return [];
 
     return clientContributions.top_features.map((feature) => {
-      const dataPoint: Record<string, any> = {
+      const dataPoint: ChartDataPoint = {
         feature: `(${feature.coord[0]},${feature.coord[1]})`,
         importance: feature.importance,
       };
 
       feature.client_values.forEach((value, idx) => {
-        dataPoint[`client_${idx}`] = value;
+        (dataPoint as unknown as Record<string, number>)[`client_${idx}`] = value;
       });
 
       return dataPoint;
     });
   }, [clientContributions]);
 
-  const clientNames = useMemo(() => {
+  const clientNames = useMemo((): string[] => {
     if (!clientContributions?.client_names) return [];
     return clientContributions.client_names;
   }, [clientContributions]);
@@ -62,43 +86,41 @@ export function ClientContributionAttribution({ clientContributions }: Props) {
     );
   }
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
+  const CustomTooltip = ({ active, payload, label }: TooltipProps<number, string>) => {
     if (active && payload && payload.length) {
-      const total = payload
-        .filter((p: any) => p.dataKey?.startsWith("client_"))
-        .reduce((sum: number, p: any) => sum + p.value, 0);
+      const clientPayloads = payload.filter(isClientPayload);
+      const total = clientPayloads.reduce((sum, p) => sum + p.value, 0);
+      const dataPayload = payload[0]?.payload as ChartDataPoint | undefined;
 
       return (
         <div className="bg-[#111827] border border-gray-700 rounded-lg p-3 shadow-xl">
           <div className="text-xs text-gray-400 mb-2">特征坐标 {label}</div>
           <div className="text-xs text-cyan-400 mb-2">
-            总重要性: {payload[0]?.payload?.importance?.toFixed(2) || 0}%
+            总重要性: {dataPayload?.importance?.toFixed(2) || 0}%
           </div>
           <div className="space-y-1">
-            {payload
-              .filter((p: any) => p.dataKey?.startsWith("client_"))
-              .map((p: any) => {
-                const clientIdx = parseInt(p.dataKey.split("_")[1]);
-                const percentage = total > 0 ? ((p.value / total) * 100).toFixed(1) : "0.0";
-                return (
-                  <div key={p.dataKey} className="flex items-center justify-between gap-4 text-xs">
-                    <div className="flex items-center gap-2">
-                      <div
-                        style={{
-                          width: "10px",
-                          height: "10px",
-                          backgroundColor: p.color,
-                          borderRadius: "2px",
-                        }}
-                      />
-                      <span className="text-gray-300">{clientNames[clientIdx] || `Client ${clientIdx}`}</span>
-                    </div>
-                    <span className="text-cyan-400 font-mono">
-                      {p.value.toFixed(2)}% ({percentage}%)
-                    </span>
+            {clientPayloads.map((p) => {
+              const clientIdx = parseInt(p.dataKey.split("_")[1]);
+              const percentage = total > 0 ? ((p.value / total) * 100).toFixed(1) : "0.0";
+              return (
+                <div key={p.dataKey} className="flex items-center justify-between gap-4 text-xs">
+                  <div className="flex items-center gap-2">
+                    <div
+                      style={{
+                        width: "10px",
+                        height: "10px",
+                        backgroundColor: p.color,
+                        borderRadius: "2px",
+                      }}
+                    />
+                    <span className="text-gray-300">{clientNames[clientIdx] || `Client ${clientIdx}`}</span>
                   </div>
-                );
-              })}
+                  <span className="text-cyan-400 font-mono">
+                    {p.value.toFixed(2)}% ({percentage}%)
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
       );

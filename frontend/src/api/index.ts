@@ -209,6 +209,30 @@ export interface InterpretabilityComplete {
 
 export type InterpretabilityWebSocketMessage = InterpretabilityProgress | InterpretabilityComplete;
 
+export interface InterpretabilitySingleStatus {
+  experiment_id: string;
+  method: AnalysisMethod;
+  num_samples: number;
+  status: string;
+  progress: number;
+  current_sample?: number;
+  logs?: InterpretabilityLogEntry[];
+  cached?: boolean;
+}
+
+export interface InterpretabilityListStatus {
+  experiment_id: string;
+  analyses: Array<{
+    method: AnalysisMethod;
+    num_samples: number;
+    status: string;
+    progress: number;
+    cached?: boolean;
+    current_sample?: number;
+    logs?: InterpretabilityLogEntry[];
+  }>;
+}
+
 export async function startInterpretabilityAnalysis(
   experimentId: string,
   method: AnalysisMethod,
@@ -246,7 +270,7 @@ export async function getInterpretabilityStatus(
   experimentId: string,
   method?: AnalysisMethod,
   numSamples?: number
-): Promise<any> {
+): Promise<InterpretabilitySingleStatus | InterpretabilityListStatus> {
   const params = new URLSearchParams();
   if (method) params.append("method", method);
   if (numSamples !== undefined) params.append("num_samples", numSamples.toString());

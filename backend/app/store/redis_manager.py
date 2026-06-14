@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import json
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 
 import redis.asyncio as redis
+
+if TYPE_CHECKING:
+    import torch
 
 logger = logging.getLogger(__name__)
 
@@ -122,3 +127,21 @@ class RedisManager:
         pattern = f"experiment:{experiment_id}:interpretability:*"
         keys = await self.client.keys(pattern)
         return [key.split(":")[-2:] for key in keys]
+
+    async def set_global_model_state(self, experiment_id: str, state_dict: Dict):
+        key = f"experiment:{experiment_id}:global_model_state"
+        serializable = {k: v.tolist() for k, v in state_dict.items()}
+        await self.client.set(key, json.dumps(serializable))
+
+    async def get_global_model_state(self, experiment_id: str) -> Optional[Dict[str, torch.Tensor]]:
+        key = f"experiment:{experiment_id}:global_model_state"
+        data = await self.client.get(key)
+        if data is None:
+            return None
+        try:
+            import torch
+            serializable = json.loads(data)
+            return {k: torch.tensor(v) for k, v in serializable.items()}
+        except Exception as e:
+            logger.error(f"Failed to deserialize global model state: {e}")
+            return None

@@ -323,18 +323,25 @@ class InterpretabilityRequest(BaseModel):
     num_samples: int = Field(..., ge=10, le=500, description="Number of samples (10, 50, 100, 500)")
 
 
-def _get_global_model_state(experiment_id: str) -> Optional[Dict[str, torch.Tensor]]:
+async def _get_global_model_state(experiment_id: str) -> Optional[Dict[str, torch.Tensor]]:
     if experiment_id in trainers:
         trainer = trainers[experiment_id]
         return {k: v.cpu() for k, v in trainer.global_model.state_dict().items()}
     
-    logger.warning(f"Experiment {experiment_id} not in trainers, attempting to reconstruct from config")
-    config = asyncio.run(redis_mgr.get_experiment(experiment_id))
+    logger.warning(f"Experiment {experiment_id} not in trainers, attempting to load from Redis")
+    saved_state = await redis_mgr.get_global_model_state(experiment_id)
+    if saved_state is not None:
+        logger.info(f"Successfully loaded global model state from Redis for {experiment_id}")
+        return {k: v.cpu() for k, v in saved_state.items()}
+    
+    logger.error(f"No global model state available for {experiment_id}")
+    config = await redis_mgr.get_experiment(experiment_id)
     if config is None:
         return None
     
     from app.models.networks import get_model
     model = get_model(config.get("dataset", "mnist"))
+    logger.warning(f"Falling back to untrained model for {experiment_id} - interpretability results will be meaningless")
     return {k: v.cpu() for k, v in model.state_dict().items()}
 
 
@@ -416,15 +423,17 @@ async def start_interpretability_analysis(
     
     service = InterpretabilityService(experiment_id, config, redis_client=redis_mgr.client)
     
-    global_state = _get_global_model_state(experiment_id)
+    global_state = await _get_global_model_state(experiment_id)
     if global_state is None:
         raise HTTPException(status_code=500, detail="Failed to load global model state")
     
     service.load_global_model(global_state)
     service.setup_data()
     
-    async def progress_callback(progress: float, current_sample: int, log_entry: Optional[Dict] = None):
-        await _broadcast_interpretability_progress(experiment_id, progress, current_sample, log_entry)
+    def progress_callback(progress: float, current_sample: int, log_entry: Optional[Dict] = None):
+        asyncio.create_task(
+            _broadcast_interpretability_progress(experiment_id, progress, current_sample, log_entry)
+        )
     
     service.add_progress_callback(progress_callback)
     

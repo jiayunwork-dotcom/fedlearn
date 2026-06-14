@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useMemo } from "react";
 import { X } from "lucide-react";
 import { FeatureImportanceHeatmap } from "./FeatureImportanceHeatmap";
 

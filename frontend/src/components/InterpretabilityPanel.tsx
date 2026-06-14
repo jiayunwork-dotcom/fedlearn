@@ -1,5 +1,5 @@
-import { useEffect, useRef } from "react";
-import { X, Play, Square, BarChart3, Brain, Zap, Target } from "lucide-react";
+import { useEffect, useRef, type ComponentType } from "react";
+import { X, Play, Square, BarChart3, Brain, Zap, Target, type LucideProps } from "lucide-react";
 import { useAppStore } from "@/store";
 import type { AnalysisMethod, InterpretabilityLogEntry } from "@/api";
 import { FeatureImportanceHeatmap } from "./FeatureImportanceHeatmap";
@@ -11,7 +11,7 @@ interface Props {
   onClose: () => void;
 }
 
-const METHOD_OPTIONS: Array<{ value: AnalysisMethod; label: string; description: string; icon: any }> = [
+const METHOD_OPTIONS: Array<{ value: AnalysisMethod; label: string; description: string; icon: ComponentType<LucideProps> }> = [
   {
     value: "gradient",
     label: "梯度归因",
@@ -34,7 +34,7 @@ const METHOD_OPTIONS: Array<{ value: AnalysisMethod; label: string; description:
 
 const SAMPLE_OPTIONS = [10, 50, 100, 500];
 
-function Shuffle(props: any) {
+function Shuffle(props: LucideProps) {
   return (
     <svg
       {...props}

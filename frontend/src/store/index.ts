@@ -17,7 +17,6 @@ import {
   batchCompareExperiments,
   startInterpretabilityAnalysis,
   cancelInterpretabilityAnalysis,
-  getInterpretabilityResult,
   getInterpretabilityWebSocketUrl,
 } from "@/api";
 
@@ -314,11 +313,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         });
         get().disconnectInterpretabilityWs();
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Failed to start analysis";
       console.error("Failed to start interpretability analysis:", e);
       set({
         interpretabilityStatus: "error",
-        interpretabilityError: e.message || "Failed to start analysis",
+        interpretabilityError: message,
       });
       get().disconnectInterpretabilityWs();
     }
@@ -335,11 +335,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
       set({ interpretabilityStatus: "cancelled" });
       get().disconnectInterpretabilityWs();
-    } catch (e: any) {
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Failed to cancel analysis";
       console.error("Failed to cancel interpretability analysis:", e);
       set({
         interpretabilityStatus: "error",
-        interpretabilityError: e.message || "Failed to cancel analysis",
+        interpretabilityError: message,
       });
     }
   },
