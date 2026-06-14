@@ -123,10 +123,112 @@ class RedisManager:
         key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}"
         await self.client.delete(key)
 
-    async def list_interpretability_results(self, experiment_id: str) -> List[str]:
+    async def list_interpretability_results(self, experiment_id: str) -> List[List[str]]:
         pattern = f"experiment:{experiment_id}:interpretability:*"
         keys = await self.client.keys(pattern)
-        return [key.split(":")[-2:] for key in keys]
+        results = []
+        for key in keys:
+            parts = key.split(":")
+            if len(parts) >= 5:
+                results.append([parts[-2], parts[-1]])
+        return results
+
+    async def set_interpretability_meta(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int,
+        meta: dict
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:meta"
+        await self.client.set(key, json.dumps(meta))
+
+    async def get_interpretability_meta(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ) -> Optional[dict]:
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:meta"
+        data = await self.client.get(key)
+        return json.loads(data) if data else None
+
+    async def delete_interpretability_meta(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:meta"
+        await self.client.delete(key)
+
+    async def set_interpretability_running_state(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int,
+        state: dict
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:running"
+        await self.client.set(key, json.dumps(state))
+
+    async def get_interpretability_running_state(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ) -> Optional[dict]:
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:running"
+        data = await self.client.get(key)
+        return json.loads(data) if data else None
+
+    async def delete_interpretability_running_state(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:running"
+        await self.client.delete(key)
+
+    async def append_interpretability_log(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int,
+        log_entry: dict
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:logs"
+        await self.client.rpush(key, json.dumps(log_entry))
+
+    async def get_interpretability_logs(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ) -> List[dict]:
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:logs"
+        data = await self.client.lrange(key, 0, -1)
+        return [json.loads(item) for item in data]
+
+    async def delete_interpretability_logs(
+        self,
+        experiment_id: str,
+        method: str,
+        num_samples: int
+    ):
+        key = f"experiment:{experiment_id}:interpretability:{method}:{num_samples}:logs"
+        await self.client.delete(key)
+
+    async def list_running_interpretability(self, experiment_id: str) -> List[List[str]]:
+        pattern = f"experiment:{experiment_id}:interpretability:*:*:running"
+        keys = await self.client.keys(pattern)
+        results = []
+        for key in keys:
+            parts = key.split(":")
+            if len(parts) >= 6:
+                results.append([parts[-4], parts[-3]])
+        return results
 
     async def set_global_model_state(self, experiment_id: str, state_dict: Dict):
         key = f"experiment:{experiment_id}:global_model_state"

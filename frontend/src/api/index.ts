@@ -238,7 +238,8 @@ export async function startInterpretabilityAnalysis(
   method: AnalysisMethod,
   numSamples: number
 ): Promise<{
-  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string; cached: boolean; result?: InterpretabilityResult
+  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string;
+  cached: boolean; result?: InterpretabilityResult; analysis_timestamp?: number;
 }> {
   const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/start`, {
     method: "POST",
@@ -286,13 +287,96 @@ export async function getInterpretabilityResult(
   method: AnalysisMethod,
   numSamples: number
 ): Promise<{
-  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string; result?: InterpretabilityResult; progress?: number
+  experiment_id: string; method: AnalysisMethod; num_samples: number; status: string;
+  result?: InterpretabilityResult; progress?: number; current_sample?: number;
+  logs?: InterpretabilityLogEntry[]; analysis_timestamp?: number; resumed?: boolean;
 }> {
   const res = await fetch(
     `${API_BASE}/experiments/${experimentId}/interpretability/result?method=${method}&num_samples=${numSamples}`
   );
   if (!res.ok) throw new Error(`Get interpretability result failed: ${res.statusText}`);
   return res.json();
+}
+
+export interface InterpretabilityHistoryEntry {
+  method: AnalysisMethod;
+  num_samples: number;
+  status: string;
+  progress: number;
+  analysis_timestamp?: number;
+  cached?: boolean;
+  resumed?: boolean;
+  current_sample?: number;
+}
+
+export async function getInterpretabilityHistory(
+  experimentId: string
+): Promise<{ experiment_id: string; analyses: InterpretabilityHistoryEntry[] }> {
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/history`);
+  if (!res.ok) throw new Error(`Get interpretability history failed: ${res.statusText}`);
+  return res.json();
+}
+
+export interface ResumeAnalysisEntry {
+  method: AnalysisMethod;
+  num_samples: number;
+  status: string;
+  progress: number;
+  current_sample: number;
+  logs?: InterpretabilityLogEntry[];
+  resumed?: boolean;
+}
+
+export async function resumeInterpretability(
+  experimentId: string
+): Promise<{ experiment_id: string; running_analyses: ResumeAnalysisEntry[] }> {
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/resume`);
+  if (!res.ok) throw new Error(`Resume interpretability failed: ${res.statusText}`);
+  return res.json();
+}
+
+export interface InterpretabilityCompareItem {
+  method: AnalysisMethod;
+  num_samples: number;
+  analysis_timestamp?: number;
+  overall_attribution?: number[][][];
+  class_attributions?: number[][][][];
+  client_contributions?: ClientContributions;
+  error?: string;
+}
+
+export async function batchCompareInterpretability(
+  experimentId: string,
+  analyses: Array<{ method: AnalysisMethod; num_samples: number; status: string; analysis_timestamp?: number }>
+): Promise<{ experiment_id: string; comparisons: InterpretabilityCompareItem[] }> {
+  const res = await fetch(`${API_BASE}/experiments/${experimentId}/interpretability/batch-compare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ analyses }),
+  });
+  if (!res.ok) throw new Error(`Batch compare interpretability failed: ${res.statusText}`);
+  return res.json();
+}
+
+export async function exportInterpretabilityReport(
+  experimentId: string,
+  method: AnalysisMethod,
+  numSamples: number
+): Promise<void> {
+  const url = `${API_BASE}/experiments/${experimentId}/interpretability/export?method=${method}&num_samples=${numSamples}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Export interpretability report failed: ${res.statusText}`);
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^"]+)"?/);
+  const filename = match ? match[1] : `${experimentId}_${method}_${numSamples}_${Date.now()}.json`;
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(link.href);
 }
 
 export function getInterpretabilityWebSocketUrl(experimentId: string): string {

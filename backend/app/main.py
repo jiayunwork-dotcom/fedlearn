@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import json
+import time
 from typing import Dict, Optional, List
 
 from pydantic import BaseModel, Field
@@ -320,7 +321,16 @@ async def batch_compare_experiments(req: BatchCompareRequest):
 
 class InterpretabilityRequest(BaseModel):
     method: AnalysisMethod = Field(..., description="Analysis method: gradient | permutation | shap")
-    num_samples: int = Field(..., ge=10, le=500, description="Number of samples (10, 50, 100, 500)")
+    num_samples: int = Field(..., ge=10, le=1000, description="Number of samples (10-1000)")
+
+class InterpretabilityHistoryItem(BaseModel):
+    method: str
+    num_samples: int
+    analysis_timestamp: Optional[float] = None
+    status: str
+
+class InterpretabilityBatchCompareRequest(BaseModel):
+    analyses: List[InterpretabilityHistoryItem] = Field(..., min_length=2, max_length=3)
 
 
 async def _get_global_model_state(experiment_id: str) -> Optional[Dict[str, torch.Tensor]]:
@@ -347,21 +357,25 @@ async def _get_global_model_state(experiment_id: str) -> Optional[Dict[str, torc
 
 async def _broadcast_interpretability_progress(
     experiment_id: str,
+    method: str,
+    num_samples: int,
     progress: float,
     current_sample: int,
     log_entry: Optional[Dict] = None
 ):
     ws_key = f"interpretability:{experiment_id}"
     connections = active_ws_connections.get(ws_key, [])
-    
+
     message = {
         "type": "progress",
+        "method": method,
+        "num_samples": num_samples,
         "progress": progress,
         "current_sample": current_sample,
     }
     if log_entry:
         message["log"] = log_entry
-    
+
     disconnected = []
     for ws in connections:
         try:
@@ -369,9 +383,26 @@ async def _broadcast_interpretability_progress(
         except Exception as e:
             logger.warning(f"Failed to send progress to WebSocket: {e}")
             disconnected.append(ws)
-    
+
     for ws in disconnected:
         connections.remove(ws)
+
+    try:
+        await redis_mgr.set_interpretability_running_state(
+            experiment_id, method, num_samples,
+            {
+                "status": AnalysisStatus.RUNNING.value,
+                "progress": progress,
+                "current_sample": current_sample,
+                "updated_at": time.time()
+            }
+        )
+        if log_entry:
+            await redis_mgr.append_interpretability_log(
+                experiment_id, method, num_samples, log_entry
+            )
+    except Exception as e:
+        logger.warning(f"Failed to persist interpretability progress to Redis: {e}")
 
 
 @app.post("/api/experiments/{experiment_id}/interpretability/start")
@@ -382,26 +413,30 @@ async def start_interpretability_analysis(
     config = await redis_mgr.get_experiment(experiment_id)
     if config is None:
         raise HTTPException(status_code=404, detail="Experiment not found")
-    
+
     if config.get("status") not in ("completed", "stopped"):
         raise HTTPException(
             status_code=400,
             detail="Interpretability analysis is only available for completed experiments"
         )
-    
+
     cached_result = await redis_mgr.get_interpretability_result(
         experiment_id, req.method.value, req.num_samples
     )
     if cached_result is not None:
+        cached_meta = await redis_mgr.get_interpretability_meta(
+            experiment_id, req.method.value, req.num_samples
+        )
         return {
             "experiment_id": experiment_id,
             "method": req.method.value,
             "num_samples": req.num_samples,
             "status": AnalysisStatus.COMPLETED.value,
             "cached": True,
+            "analysis_timestamp": cached_meta.get("analysis_timestamp") if cached_meta else None,
             "result": cached_result
         }
-    
+
     service_key = f"{experiment_id}:{req.method.value}:{req.num_samples}"
     if service_key in interpretability_services:
         existing = interpretability_services[service_key]
@@ -411,7 +446,7 @@ async def start_interpretability_analysis(
                 status_code=400,
                 detail="Analysis is already running for this experiment with the same parameters"
             )
-    
+
     try:
         num_classes = 10
         if req.num_samples < num_classes:
@@ -420,42 +455,80 @@ async def start_interpretability_analysis(
             )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
     service = InterpretabilityService(experiment_id, config, redis_client=redis_mgr.client)
-    
+
     global_state = await _get_global_model_state(experiment_id)
     if global_state is None:
         raise HTTPException(status_code=500, detail="Failed to load global model state")
-    
+
     service.load_global_model(global_state)
     service.setup_data()
-    
+
+    method_val = req.method.value
+    samples_val = req.num_samples
+
     def progress_callback(progress: float, current_sample: int, log_entry: Optional[Dict] = None):
         asyncio.create_task(
-            _broadcast_interpretability_progress(experiment_id, progress, current_sample, log_entry)
+            _broadcast_interpretability_progress(
+                experiment_id, method_val, samples_val, progress, current_sample, log_entry
+            )
         )
-    
+
     service.add_progress_callback(progress_callback)
-    
+
     interpretability_services[service_key] = service
-    
+
+    start_timestamp = time.time()
+    await redis_mgr.delete_interpretability_logs(experiment_id, method_val, samples_val)
+    await redis_mgr.set_interpretability_running_state(
+        experiment_id, method_val, samples_val,
+        {
+            "status": AnalysisStatus.RUNNING.value,
+            "progress": 0.0,
+            "current_sample": 0,
+            "started_at": start_timestamp,
+            "updated_at": start_timestamp
+        }
+    )
+    await redis_mgr.set_interpretability_meta(
+        experiment_id, method_val, samples_val,
+        {
+            "status": AnalysisStatus.RUNNING.value,
+            "started_at": start_timestamp,
+        }
+    )
+
     async def run_analysis():
         try:
             result = await service.analyze(req.method, req.num_samples)
-            
+            end_timestamp = time.time()
+
             if result.get("status") == AnalysisStatus.COMPLETED.value:
                 await redis_mgr.set_interpretability_result(
                     experiment_id, req.method.value, req.num_samples, result
                 )
-            
+                await redis_mgr.set_interpretability_meta(
+                    experiment_id, method_val, samples_val,
+                    {
+                        "status": AnalysisStatus.COMPLETED.value,
+                        "analysis_timestamp": end_timestamp,
+                        "started_at": start_timestamp,
+                        "completed_at": end_timestamp
+                    }
+                )
+
             ws_key = f"interpretability:{experiment_id}"
             connections = active_ws_connections.get(ws_key, [])
             message = {
                 "type": "complete",
+                "method": method_val,
+                "num_samples": samples_val,
                 "status": result.get("status"),
+                "analysis_timestamp": end_timestamp,
                 "result": result
             }
-            
+
             disconnected = []
             for ws in connections:
                 try:
@@ -463,25 +536,45 @@ async def start_interpretability_analysis(
                 except Exception as e:
                     logger.warning(f"Failed to send completion to WebSocket: {e}")
                     disconnected.append(ws)
-            
+
             for ws in disconnected:
                 connections.remove(ws)
-            
+
+            await redis_mgr.delete_interpretability_running_state(
+                experiment_id, method_val, samples_val
+            )
+
             if service_key in interpretability_services:
                 del interpretability_services[service_key]
-            
+
         except Exception as e:
             logger.error(f"Analysis task failed: {e}", exc_info=True)
+            try:
+                await redis_mgr.delete_interpretability_running_state(
+                    experiment_id, method_val, samples_val
+                )
+                await redis_mgr.set_interpretability_meta(
+                    experiment_id, method_val, samples_val,
+                    {
+                        "status": AnalysisStatus.FAILED.value,
+                        "started_at": start_timestamp,
+                        "failed_at": time.time(),
+                        "error": str(e)
+                    }
+                )
+            except Exception:
+                pass
             if service_key in interpretability_services:
                 del interpretability_services[service_key]
-    
+
     asyncio.create_task(run_analysis())
-    
+
     return {
         "experiment_id": experiment_id,
         "method": req.method.value,
         "num_samples": req.num_samples,
         "status": AnalysisStatus.RUNNING.value,
+        "analysis_timestamp": start_timestamp,
         "cached": False
     }
 
@@ -496,6 +589,19 @@ async def cancel_interpretability_analysis(
         service_key = f"{experiment_id}:{method.value}:{num_samples}"
         if service_key in interpretability_services:
             interpretability_services[service_key].cancel()
+            try:
+                await redis_mgr.delete_interpretability_running_state(
+                    experiment_id, method.value, num_samples
+                )
+                await redis_mgr.set_interpretability_meta(
+                    experiment_id, method.value, num_samples,
+                    {
+                        "status": AnalysisStatus.CANCELLED.value,
+                        "cancelled_at": time.time()
+                    }
+                )
+            except Exception:
+                pass
             return {
                 "experiment_id": experiment_id,
                 "method": method.value,
@@ -514,18 +620,33 @@ async def cancel_interpretability_analysis(
                 service.cancel()
                 parts = service_key.split(":")
                 if len(parts) >= 3:
+                    m = parts[-2]
+                    ns = int(parts[-1])
                     cancelled.append({
-                        "method": parts[-2],
-                        "num_samples": int(parts[-1])
+                        "method": m,
+                        "num_samples": ns
                     })
+                    try:
+                        await redis_mgr.delete_interpretability_running_state(
+                            experiment_id, m, ns
+                        )
+                        await redis_mgr.set_interpretability_meta(
+                            experiment_id, m, ns,
+                            {
+                                "status": AnalysisStatus.CANCELLED.value,
+                                "cancelled_at": time.time()
+                            }
+                        )
+                    except Exception:
+                        pass
                 del interpretability_services[service_key]
-        
+
         if not cancelled:
             raise HTTPException(
                 status_code=404,
                 detail="No running analysis found for this experiment"
             )
-        
+
         return {
             "experiment_id": experiment_id,
             "status": AnalysisStatus.CANCELLED.value,
@@ -543,26 +664,57 @@ async def get_interpretability_status(
         service_key = f"{experiment_id}:{method.value}:{num_samples}"
         if service_key in interpretability_services:
             service = interpretability_services[service_key]
-            return {
+            status = service.get_status()
+            meta = await redis_mgr.get_interpretability_meta(
+                experiment_id, method.value, num_samples
+            )
+            response = {
                 "experiment_id": experiment_id,
                 "method": method.value,
                 "num_samples": num_samples,
-                **service.get_status()
+                **status
             }
-        
+            if meta:
+                response["analysis_timestamp"] = meta.get("analysis_timestamp")
+                response["started_at"] = meta.get("started_at")
+            return response
+
         cached = await redis_mgr.get_interpretability_result(
             experiment_id, method.value, num_samples
         )
         if cached is not None:
+            meta = await redis_mgr.get_interpretability_meta(
+                experiment_id, method.value, num_samples
+            )
             return {
                 "experiment_id": experiment_id,
                 "method": method.value,
                 "num_samples": num_samples,
                 "status": AnalysisStatus.COMPLETED.value,
                 "progress": 100.0,
-                "cached": True
+                "cached": True,
+                "analysis_timestamp": meta.get("analysis_timestamp") if meta else None
             }
-        
+
+        running_state = await redis_mgr.get_interpretability_running_state(
+            experiment_id, method.value, num_samples
+        )
+        if running_state is not None:
+            logs = await redis_mgr.get_interpretability_logs(
+                experiment_id, method.value, num_samples
+            )
+            return {
+                "experiment_id": experiment_id,
+                "method": method.value,
+                "num_samples": num_samples,
+                "status": running_state.get("status", AnalysisStatus.RUNNING.value),
+                "progress": running_state.get("progress", 0.0),
+                "current_sample": running_state.get("current_sample", 0),
+                "logs": logs,
+                "cached": False,
+                "resumed": True
+            }
+
         return {
             "experiment_id": experiment_id,
             "method": method.value,
@@ -581,17 +733,47 @@ async def get_interpretability_status(
                         "num_samples": int(parts[-1]),
                         **service.get_status()
                     })
-        
-        cached_results = await redis_mgr.list_interpretability_results(experiment_id)
-        for method_str, num_samples_str in cached_results:
-            statuses.append({
-                "method": method_str,
-                "num_samples": int(num_samples_str),
-                "status": AnalysisStatus.COMPLETED.value,
-                "progress": 100.0,
-                "cached": True
-            })
-        
+
+        cached_pairs = await redis_mgr.list_interpretability_results(experiment_id)
+        for method_str, num_samples_str in cached_pairs:
+            ns = int(num_samples_str)
+            meta = await redis_mgr.get_interpretability_meta(experiment_id, method_str, ns)
+            found = False
+            for s in statuses:
+                if s["method"] == method_str and s["num_samples"] == ns:
+                    found = True
+                    break
+            if not found:
+                statuses.append({
+                    "method": method_str,
+                    "num_samples": ns,
+                    "status": AnalysisStatus.COMPLETED.value,
+                    "progress": 100.0,
+                    "cached": True,
+                    "analysis_timestamp": meta.get("analysis_timestamp") if meta else None
+                })
+
+        running_pairs = await redis_mgr.list_running_interpretability(experiment_id)
+        for method_str, num_samples_str in running_pairs:
+            ns = int(num_samples_str)
+            found = False
+            for s in statuses:
+                if s["method"] == method_str and s["num_samples"] == ns:
+                    found = True
+                    break
+            if not found:
+                running_state = await redis_mgr.get_interpretability_running_state(
+                    experiment_id, method_str, ns
+                )
+                statuses.append({
+                    "method": method_str,
+                    "num_samples": ns,
+                    "status": running_state.get("status", AnalysisStatus.RUNNING.value) if running_state else AnalysisStatus.RUNNING.value,
+                    "progress": running_state.get("progress", 0.0) if running_state else 0.0,
+                    "current_sample": running_state.get("current_sample", 0) if running_state else 0,
+                    "resumed": True
+                })
+
         return {
             "experiment_id": experiment_id,
             "analyses": statuses
@@ -608,14 +790,20 @@ async def get_interpretability_result(
         experiment_id, method.value, num_samples
     )
     if cached is not None:
-        return {
+        meta = await redis_mgr.get_interpretability_meta(
+            experiment_id, method.value, num_samples
+        )
+        response = {
             "experiment_id": experiment_id,
             "method": method.value,
             "num_samples": num_samples,
             "status": AnalysisStatus.COMPLETED.value,
             "result": cached
         }
-    
+        if meta:
+            response["analysis_timestamp"] = meta.get("analysis_timestamp")
+        return response
+
     service_key = f"{experiment_id}:{method.value}:{num_samples}"
     if service_key in interpretability_services:
         service = interpretability_services[service_key]
@@ -627,24 +815,273 @@ async def get_interpretability_result(
             "status": status["status"],
             "progress": status["progress"]
         }
-    
+
+    running_state = await redis_mgr.get_interpretability_running_state(
+        experiment_id, method.value, num_samples
+    )
+    if running_state is not None:
+        logs = await redis_mgr.get_interpretability_logs(
+            experiment_id, method.value, num_samples
+        )
+        return {
+            "experiment_id": experiment_id,
+            "method": method.value,
+            "num_samples": num_samples,
+            "status": running_state.get("status", AnalysisStatus.RUNNING.value),
+            "progress": running_state.get("progress", 0.0),
+            "current_sample": running_state.get("current_sample", 0),
+            "logs": logs,
+            "resumed": True
+        }
+
     raise HTTPException(
         status_code=404,
         detail="No result found for the specified analysis parameters"
     )
 
 
+@app.get("/api/experiments/{experiment_id}/interpretability/history")
+async def get_interpretability_history(experiment_id: str):
+    analyses = []
+
+    service_keys = list(interpretability_services.keys())
+    for service_key in service_keys:
+        if service_key.startswith(f"{experiment_id}:"):
+            parts = service_key.split(":")
+            if len(parts) >= 3:
+                method_str = parts[-2]
+                ns = int(parts[-1])
+                service = interpretability_services[service_key]
+                status = service.get_status()
+                meta = await redis_mgr.get_interpretability_meta(experiment_id, method_str, ns)
+                analyses.append({
+                    "method": method_str,
+                    "num_samples": ns,
+                    "status": status.get("status", AnalysisStatus.RUNNING.value),
+                    "progress": status.get("progress", 0.0),
+                    "analysis_timestamp": meta.get("analysis_timestamp") if meta else None,
+                    "cached": False
+                })
+
+    cached_pairs = await redis_mgr.list_interpretability_results(experiment_id)
+    for method_str, num_samples_str in cached_pairs:
+        ns = int(num_samples_str)
+        found = False
+        for a in analyses:
+            if a["method"] == method_str and a["num_samples"] == ns:
+                found = True
+                break
+        if not found:
+            meta = await redis_mgr.get_interpretability_meta(experiment_id, method_str, ns)
+            analyses.append({
+                "method": method_str,
+                "num_samples": ns,
+                "status": AnalysisStatus.COMPLETED.value,
+                "progress": 100.0,
+                "analysis_timestamp": meta.get("analysis_timestamp") if meta else None,
+                "cached": True
+            })
+
+    running_pairs = await redis_mgr.list_running_interpretability(experiment_id)
+    for method_str, num_samples_str in running_pairs:
+        ns = int(num_samples_str)
+        found = False
+        for a in analyses:
+            if a["method"] == method_str and a["num_samples"] == ns:
+                found = True
+                break
+        if not found:
+            running_state = await redis_mgr.get_interpretability_running_state(
+                experiment_id, method_str, ns
+            )
+            analyses.append({
+                "method": method_str,
+                "num_samples": ns,
+                "status": running_state.get("status", AnalysisStatus.RUNNING.value) if running_state else AnalysisStatus.RUNNING.value,
+                "progress": running_state.get("progress", 0.0) if running_state else 0.0,
+                "analysis_timestamp": running_state.get("started_at") if running_state else None,
+                "cached": False,
+                "resumed": True
+            })
+
+    analyses.sort(key=lambda x: x.get("analysis_timestamp") or 0, reverse=True)
+    return {"experiment_id": experiment_id, "analyses": analyses}
+
+
+@app.get("/api/experiments/{experiment_id}/interpretability/resume")
+async def resume_interpretability(experiment_id: str):
+    running_analyses = []
+
+    for service_key, service in list(interpretability_services.items()):
+        if service_key.startswith(f"{experiment_id}:"):
+            parts = service_key.split(":")
+            if len(parts) >= 3:
+                method_str = parts[-2]
+                ns = int(parts[-1])
+                status = service.get_status()
+                running_analyses.append({
+                    "method": method_str,
+                    "num_samples": ns,
+                    **status
+                })
+
+    running_pairs = await redis_mgr.list_running_interpretability(experiment_id)
+    for method_str, num_samples_str in running_pairs:
+        ns = int(num_samples_str)
+        found = False
+        for a in running_analyses:
+            if a["method"] == method_str and a["num_samples"] == ns:
+                found = True
+                break
+        if not found:
+            running_state = await redis_mgr.get_interpretability_running_state(
+                experiment_id, method_str, ns
+            )
+            logs = await redis_mgr.get_interpretability_logs(experiment_id, method_str, ns)
+            if running_state:
+                running_analyses.append({
+                    "method": method_str,
+                    "num_samples": ns,
+                    "status": running_state.get("status", AnalysisStatus.RUNNING.value),
+                    "progress": running_state.get("progress", 0.0),
+                    "current_sample": running_state.get("current_sample", 0),
+                    "logs": logs,
+                    "resumed": True
+                })
+
+    return {
+        "experiment_id": experiment_id,
+        "running_analyses": running_analyses
+    }
+
+
+@app.post("/api/experiments/{experiment_id}/interpretability/batch-compare")
+async def batch_compare_interpretability(
+    experiment_id: str,
+    req: InterpretabilityBatchCompareRequest
+):
+    results = []
+    for item in req.analyses:
+        cached = await redis_mgr.get_interpretability_result(
+            experiment_id, item.method, item.num_samples
+        )
+        meta = await redis_mgr.get_interpretability_meta(
+            experiment_id, item.method, item.num_samples
+        )
+        if cached is not None:
+            results.append({
+                "method": item.method,
+                "num_samples": item.num_samples,
+                "analysis_timestamp": meta.get("analysis_timestamp") if meta else None,
+                "overall_attribution": cached.get("overall_attribution"),
+                "class_attributions": cached.get("class_attributions"),
+                "client_contributions": cached.get("client_contributions")
+            })
+        else:
+            results.append({
+                "method": item.method,
+                "num_samples": item.num_samples,
+                "error": "result not found"
+            })
+    return {"experiment_id": experiment_id, "comparisons": results}
+
+
+@app.get("/api/experiments/{experiment_id}/interpretability/export")
+async def export_interpretability_report(
+    experiment_id: str,
+    method: AnalysisMethod,
+    num_samples: int
+):
+    from fastapi.responses import JSONResponse
+
+    cached = await redis_mgr.get_interpretability_result(
+        experiment_id, method.value, num_samples
+    )
+    if cached is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No result found for the specified analysis parameters"
+        )
+
+    meta = await redis_mgr.get_interpretability_meta(
+        experiment_id, method.value, num_samples
+    )
+    analysis_ts = meta.get("analysis_timestamp") if meta else None
+    timestamp_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(analysis_ts)) if analysis_ts else time.strftime("%Y%m%d_%H%M%S")
+
+    overall = cached.get("overall_attribution", [])
+    class_attrs = cached.get("class_attributions", [])
+    client_contribs = cached.get("client_contributions", {})
+
+    overall_importance = None
+    if overall and overall[0]:
+        flat = []
+        for row in overall[0]:
+            flat.extend(row)
+        import heapq
+        top10_idx = heapq.nlargest(10, range(len(flat)), key=lambda i: flat[i])
+        overall_importance = [
+            {
+                "feature_index": int(idx),
+                "coord": [idx // 28, idx % 28],
+                "value": round(float(flat[idx]), 4)
+            }
+            for idx in top10_idx
+        ]
+
+    per_class_top5 = []
+    num_classes = len(class_attrs)
+    for c in range(num_classes):
+        class_data = class_attrs[c]
+        if class_data and class_data[0]:
+            flat = []
+            for row in class_data[0]:
+                flat.extend(row)
+            import heapq
+            top5_idx = heapq.nlargest(5, range(len(flat)), key=lambda i: flat[i])
+            per_class_top5.append({
+                "class": c,
+                "top_features": [
+                    {
+                        "feature_index": int(idx),
+                        "coord": [idx // 28, idx % 28],
+                        "value": round(float(flat[idx]), 4)
+                    }
+                    for idx in top5_idx
+                ]
+            })
+
+    report = {
+        "experiment_id": experiment_id,
+        "analysis_method": method.value,
+        "num_samples": num_samples,
+        "analysis_timestamp": analysis_ts if analysis_ts else time.time(),
+        "global_feature_importance": overall,
+        "per_class_top5_features": per_class_top5,
+        "top10_overall_features": overall_importance,
+        "client_contributions": client_contribs
+    }
+
+    filename = f"{experiment_id}_{method.value}_{num_samples}_{timestamp_str}.json"
+    return JSONResponse(
+        content=report,
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
+
+
 @app.websocket("/ws/experiments/{experiment_id}/interpretability")
 async def interpretability_websocket(websocket: WebSocket, experiment_id: str):
     await websocket.accept()
-    
+
     ws_key = f"interpretability:{experiment_id}"
     if ws_key not in active_ws_connections:
         active_ws_connections[ws_key] = []
     active_ws_connections[ws_key].append(websocket)
-    
+
     logger.info(f"WebSocket connected for interpretability: {experiment_id}")
-    
+
     try:
         while True:
             data = await websocket.receive_text()
@@ -652,6 +1089,30 @@ async def interpretability_websocket(websocket: WebSocket, experiment_id: str):
                 msg = json.loads(data)
                 if msg.get("type") == "ping":
                     await websocket.send_json({"type": "pong"})
+                elif msg.get("type") == "request_resume":
+                    method = msg.get("method")
+                    num_samples = msg.get("num_samples")
+                    if method and num_samples:
+                        try:
+                            ns_val = int(num_samples)
+                            running_state = await redis_mgr.get_interpretability_running_state(
+                                experiment_id, method, ns_val
+                            )
+                            logs = await redis_mgr.get_interpretability_logs(
+                                experiment_id, method, ns_val
+                            )
+                            if running_state:
+                                await websocket.send_json({
+                                    "type": "resume_state",
+                                    "method": method,
+                                    "num_samples": ns_val,
+                                    "status": running_state.get("status", AnalysisStatus.RUNNING.value),
+                                    "progress": running_state.get("progress", 0.0),
+                                    "current_sample": running_state.get("current_sample", 0),
+                                    "logs": logs
+                                })
+                        except Exception as e:
+                            logger.warning(f"Failed to send resume state: {e}")
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
